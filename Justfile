@@ -1,0 +1,2 @@
+root := justfile_directory()
+

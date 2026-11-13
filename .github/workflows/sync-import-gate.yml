@@ -1,0 +1,50 @@
+name: Sync import gate
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited, ready_for_review, closed]
+
+permissions:
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: sync-import-gate-${{ github.event.pull_request.head.sha }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    name: Publish sync import gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const publicRepo = repo === 'repo';
+            const source = publicRepo ? 'sync/from-review' : 'sync/from-public';
+            const operation = publicRepo ? 'merge-public-pr' : 'merge-ee-pr';
+            const pr = context.payload.pull_request;
+            const sha = pr.head.sha;
+            // Keep import SHAs blocked after closure too, so reopening cannot reuse a passing status.
+            const associated = await github.paginate(
+              github.rest.repos.listPullRequestsAssociatedWithCommit,
+              { owner, repo, commit_sha: sha, per_page: 100 }
+            );
+            const blocked = [pr, ...associated].some(p =>
+              p.base.ref === 'main' &&
+              (p.head.ref === source || p.user.login === 'otpki-cicd[bot]' ||
+                (publicRepo && (!p.head.repo || p.head.repo.full_name === `${owner}/${repo}`)))
+            );
+            await github.rest.repos.createCommitStatus({
+              owner, repo, sha,
+              context: 'sync-import-gate',
+              state: blocked ? 'failure' : 'success',
+              description: blocked
+                ? publicRepo ? 'Use a fork; sync PRs use staging: merge-public-pr.'
+                : `Merge through staging: ${operation} (merge commit required).`
+                : publicRepo ? 'Fork contribution; admins may merge with a merge commit.'
+                : 'Ordinary EE PR; any enabled merge method is allowed.',
+              target_url: `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`
+            });
